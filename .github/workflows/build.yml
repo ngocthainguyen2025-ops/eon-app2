@@ -78,7 +78,35 @@ jobs:
         run: flutter pub get
 
       - name: Build APK (ký bằng khóa debug)
-        run: flutter build apk --release
+        run: |
+          set -o pipefail
+          flutter build apk --release 2>&1 | tee build.log
+
+      # Nếu build lỗi: tự trích đúng đoạn lỗi, hiện ngay ở trang tóm tắt (khỏi phải lục log dài)
+      - name: Tóm tắt lỗi (chỉ chạy khi build lỗi)
+        if: failure()
+        run: |
+          [ -f build.log ] || exit 0
+          awk '/What went wrong/{f=1} f{print} /\* Try:/{if(f)exit}' build.log | head -40 > loi_gradle.txt || true
+          grep -nE "Error:|error:|^e: |lib/.*\.dart:[0-9]+" build.log | head -30 > loi_dart.txt || true
+          {
+            echo "## LỖI BUILD (tự trích)"
+            echo "### Gradle"
+            echo '```'; cat loi_gradle.txt; echo '```'
+            echo "### Dart / khác"
+            echo '```'; cat loi_dart.txt; echo '```'
+            echo "### 60 dòng cuối log"
+            echo '```'; tail -60 build.log; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          MSG=$(cat loi_gradle.txt loi_dart.txt | head -25 | sed ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=Loi build::${MSG}"
+
+      - name: Lưu log build (khi lỗi)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
 
       - name: Lưu APK làm artifact
         uses: actions/upload-artifact@v4
