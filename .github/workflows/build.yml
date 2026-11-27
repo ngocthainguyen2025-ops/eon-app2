@@ -1,1 +1,97 @@
+name: Build EON GPT APK
 
+# Chạy mỗi lần đẩy mã lên GitHub (và có thể bấm chạy tay trong tab Actions)
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # để đăng APK lên mục Releases (tải trực tiếp từ điện thoại)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cách đẩy mã từ điện thoại: chỉ cần tải lên 1 file eon_gpt.zip (chứa cả thư mục lib/, pubspec.yaml).
+      # Bước này tự giải nén nếu thấy file zip ở thư mục gốc.
+      - name: Giải nén eon_gpt.zip (nếu có)
+        run: |
+          if [ -f eon_gpt.zip ]; then
+            unzip -o eon_gpt.zip
+          fi
+          if [ ! -f pubspec.yaml ] || [ ! -d lib ]; then
+            echo "::error::Không thấy pubspec.yaml / lib/. Hãy tải eon_gpt.zip hoặc đủ mã nguồn lên gốc repo."
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Repo chỉ chứa lib/ + pubspec.yaml; thư mục android/ được Flutter tạo ra lúc build.
+      - name: Tạo khung Android
+        run: |
+          mkdir -p /tmp/bak
+          cp -r lib /tmp/bak/lib
+          cp pubspec.yaml /tmp/bak/pubspec.yaml
+          flutter create --platforms=android --org vn.eon --project-name eon_gpt .
+          # khôi phục mã nguồn của ta (phòng khi flutter create ghi đè)
+          rm -rf lib
+          cp -r /tmp/bak/lib lib
+          cp /tmp/bak/pubspec.yaml pubspec.yaml
+          rm -rf test
+
+      - name: Chỉnh Android (quyền Internet, minSdk 26, tên app)
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$M"
+          sed -i 's|android:label="[^"]*"|android:label="EON GPT"|' "$M"
+          for f in android/app/build.gradle.kts android/app/build.gradle; do
+            if [ -f "$f" ]; then
+              sed -i -E 's/minSdk(Version)? *=? *flutter\.minSdkVersion/minSdk = 26/' "$f"
+            fi
+          done
+          grep -q "android.permission.INTERNET" "$M"
+          grep -rq "minSdk = 26" android/app/
+
+      # Khóa ký CỐ ĐỊNH: để SHA-1 của app không đổi sau mỗi lần build (đăng nhập Google cần đúng SHA-1)
+      - name: Dùng khóa ký cố định
+        run: |
+          if [ -f signing/debug.keystore ]; then
+            mkdir -p ~/.android
+            cp signing/debug.keystore ~/.android/debug.keystore
+            echo "Đã dùng khóa cố định. SHA-1:"
+            keytool -list -v -keystore ~/.android/debug.keystore -storepass android 2>/dev/null | grep "SHA1" || true
+          else
+            echo "::warning::Không có signing/debug.keystore -> dùng khóa debug ngẫu nhiên (đăng nhập Google sẽ không khớp)."
+          fi
+
+      - name: Cài thư viện
+        run: flutter pub get
+
+      - name: Build APK (ký bằng khóa debug)
+        run: flutter build apk --release
+
+      - name: Lưu APK làm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EON-GPT-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      # Đăng thêm lên Releases cho dễ tải từ điện thoại (không bắt buộc, lỗi cũng không sao)
+      - name: Đăng APK lên Releases (bản mới nhất)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest build/app/outputs/flutter-apk/app-release.apk \
+            --title "EON GPT - bản mới nhất" --notes "APK tự build từ commit ${GITHUB_SHA::7}"
